@@ -5,13 +5,16 @@
 import codecs
 import hashlib
 import os
+import urllib.request as urlrequest
+from os.path import splitext
+from urllib.parse import urlparse
 from PIL import Image
 from bs4 import BeautifulSoup
 from selenium import webdriver
 import re
-
+from bloom_filter import BloomFilter
 from selenium.common.exceptions import NoSuchElementException
-from selenium.webdriver import DesiredCapabilities
+import logging
 
 
 def element_screenshot(driver, element, filename):
@@ -70,7 +73,8 @@ def get_file_name(html):
 # 3. look for 2 iframes within
 # TODO: Currently scraping only 1 ads per page. Need to scrape all ads
 # TODO: Generalise for ads from other websites too.
-def get_ads_file(browser, root_url, index):
+def get_ads_file(browser, root_url, index, bloom):
+    global logger
     try:
         # Wait for page to be rendered
         browser.implicitly_wait(10)  # seconds
@@ -78,58 +82,77 @@ def get_ads_file(browser, root_url, index):
         # Save path
         save_path = os.path.expanduser('./sample-run')
 
-        # Switch to google ad frame
-        actual_ad_iframe_element = browser.find_element_by_xpath('//ins[contains(@class, "adsbygoogle")]')
-        browser.switch_to.frame(actual_ad_iframe_element.find_element_by_xpath('//iframe'))
+        # Switch to google ad frame. If it is a google normal ads
+        actual_ad_ins_element = browser.find_element_by_xpath('//ins[contains(@class, "adsbygoogle")]')
+        browser.switch_to.frame(actual_ad_ins_element.find_element_by_tag_name('iframe'))
 
-        # URL of google ad.
-        # url = browser.find_element_by_xpath('//iframe[contains(@id, "google_ads")]').get_attribute('src')
-        # browser.get(url)
-        browser.switch_to.frame(browser.find_element_by_xpath('//iframe[contains(@id, "google_ads")]'))
-
-        # Wait for the ad iframe to be rendered after the switch.
-        browser.implicitly_wait(5)
-
-        ad_iframe_element = browser.find_element_by_xpath('//iframe[@id="ad_iframe"]')
-        name = ad_iframe_element.get_attribute('src')
-
-        browser.switch_to.frame(ad_iframe_element)
-
+        # Google Ad Frame main layout with id google_ads_frame<number>.
+        # Currently only getting the first layout
+        browser.implicitly_wait(15)
+        for element in browser.find_elements_by_tag_name('iframe'):
+            if element.get_attribute('allowfullscreen') is not None:
+                browser.switch_to.frame(element)
+                break
         try:
-            name = browser.find_element_by_tag_name('img').get_attribute('src')
+            browser.implicitly_wait(10)
+            browser.switch_to.frame(browser.find_element_by_id('ad_iframe'))
+            # Switch to that or else look into the other type of html
+            # embedded google ad.
+            # Wait for the ad iframe to be rendered after the switch.
+            browser.implicitly_wait(10)
+            actual_ad_ins_element = None
+            for element in browser.find_elements_by_tag_name('iframe'):
+                if element.get_attribute('allowfullscreen') is not None:
+                    actual_ad_ins_element = element
+                    break
+            if actual_ad_ins_element is not None:
+                type = 1
+                name = actual_ad_ins_element.get_attribute('src')
+                browser.switch_to.frame(actual_ad_ins_element)
+            else:
+                type = 2
+                name = browser.find_element_by_xpath('//a//img').get_attribute('src')
         except NoSuchElementException:
-            print('Not a single image ad. Find for first iframe src.')
+            ad_href_link = browser.find_element_by_tag_name('a')
+            type = 3
+            name = ad_href_link.get_attribute('href')
 
-        html = browser.execute_script("return document.getElementsByTagName('html')[0].innerHTML")
-
-        try:
-            browser.implicitly_wait(15)
-            actual_ad_iframe_element = browser.find_element_by_xpath('//iframe[@allowfullscreen="true"]')
-            name = actual_ad_iframe_element.get_attribute('src')
-            browser.switch_to.frame(actual_ad_iframe_element)
+        finally:
             html = browser.execute_script("return document.getElementsByTagName('html')[0].innerHTML")
-        except NoSuchElementException:
-            print('No fullscreen tag iframe inside. Going with the parent.')
 
-        # Extract all script tags
+        # File name where to save.
+        utf8_name = name.encode('utf-8')
+        file_name = 'ads-' + str(type) + '-' + get_file_name(utf8_name) + '.html'
+
+        if name in bloom:
+            logger.info('already present: ' + name)
+            return
+        else:
+            bloom.add(name)
+
+        logger.info(str(name) + " : " + file_name)
+        # # Save image if type 1
+        # if type == 1:
+        #     print(name)
+        #     parsed = urlparse(url)
+        #     root, ext = splitext(parsed.path)
+        #     urlrequest.urlretrieve(name, file_name + '.' + ext)
+
+        # Remove all script tags
         soup = BeautifulSoup(html, 'html.parser')
         [x.extract() for x in soup.findAll('script')]
 
-        # File name where to save.
-        name = name.encode('utf-8')
-        file_name = 'ads-' + get_file_name(name) + '.html'
-
-        print(name, file_name)
+        print(file_name, name)
 
         # Save HTML file
         complete_name = os.path.join(save_path, file_name)
         file_object = codecs.open(complete_name, "w", "utf-8")
         file_object.write(str(soup))
         file_object.close()
-    except NoSuchElementException:
-        print('Error: element not found exception. Page structure for the ad may be different:' + root_url)
-    finally:
-        print('Finished')
+    # Didnot find any iframe with google_ads_frame<number> id.
+    except NoSuchElementException as e:
+        print(e.msg)
+        logger.error('google_ads_frame<num> not found exception:' + e.msg)
 
 
 if __name__ == '__main__':
@@ -141,21 +164,28 @@ if __name__ == '__main__':
     #     "(KHTML, like Gecko) Chrome/15.0.87")
     # driver = webdriver.PhantomJS(executable_path='/Users/anupam/Python/Ads_Scraper/phantomjs', desired_capabilities=dcap)
     driver = webdriver.Chrome(executable_path='./chromedriver')
-
+    bloom = BloomFilter(max_elements=10000, error_rate=0.1)
     # Seed URL
     url_list = ['http://www.geeksforgeeks.org/']
     driver.get(url_list[0])
     links = driver.find_elements_by_tag_name('a')
-    # for link in links:
-    #     href = link.get_attribute('href')
-    #     if href is not None and href not in url_list and 'www.geeksforgeeks.org' in href:
-    #         # print(href)
-    #         url_list.append(href)
+    for link in links:
+        href = link.get_attribute('href')
+        if href is not None and href not in url_list and 'www.geeksforgeeks.org' in href:
+            url_list.append(href)
+
+    logger = logging.getLogger('ads_scraper')
+    hdlr = logging.FileHandler('scraper.log')
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    hdlr.setFormatter(formatter)
+    logger.addHandler(hdlr)
+    logger.setLevel(logging.WARNING)
 
     print(len(url_list))
     i = 0
     for url in url_list:
         driver.get(url)
-        get_ads_file(driver, url, i)
+        get_ads_file(driver, url, i, bloom)
         i += 1
-        # driver.quit()
+
+    driver.quit()
