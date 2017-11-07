@@ -5,9 +5,12 @@
 import codecs
 import hashlib
 import os
+import urllib
 import urllib.request as urlrequest
 from os.path import splitext
 from urllib.parse import urlparse
+
+import pickle
 from PIL import Image
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -15,6 +18,8 @@ import re
 from bloom_filter import BloomFilter
 from selenium.common.exceptions import NoSuchElementException
 import logging
+
+from selenium.webdriver import DesiredCapabilities
 
 
 def element_screenshot(driver, element, filename):
@@ -78,100 +83,134 @@ def get_ads_file(browser, root_url, index, bloom):
     try:
         # Wait for page to be rendered
         browser.implicitly_wait(10)  # seconds
-
         # Save path
         save_path = os.path.expanduser('./sample-run')
 
         # Switch to google ad frame. If it is a google normal ads
-        actual_ad_ins_element = browser.find_element_by_xpath('//ins[contains(@class, "adsbygoogle")]')
+        # Works in geeksforgeeks.org browser.find_element_by_xpath('//ins[contains(@class, "adsbygoogle")]')
+        actual_ad_ins_element = browser.find_element_by_xpath('//*[contains(@class, "googlead")]')
         browser.switch_to.frame(actual_ad_ins_element.find_element_by_tag_name('iframe'))
 
         # Google Ad Frame main layout with id google_ads_frame<number>.
         # Currently only getting the first layout
+        count = 0
+        ad_src_url = ""
         browser.implicitly_wait(15)
         for element in browser.find_elements_by_tag_name('iframe'):
             if element.get_attribute('allowfullscreen') is not None:
-                browser.switch_to.frame(element)
+                if (element.get_attribute('src') is not None):
+                    count = 15
+                    ad_src_url = element.get_attribute('src')
+                else:
+                    browser.switch_to.frame(element)
+                    count = 1
                 break
-        try:
-            browser.implicitly_wait(10)
-            browser.switch_to.frame(browser.find_element_by_id('ad_iframe'))
-            # Switch to that or else look into the other type of html
-            # embedded google ad.
-            # Wait for the ad iframe to be rendered after the switch.
-            browser.implicitly_wait(10)
-            actual_ad_ins_element = None
-            for element in browser.find_elements_by_tag_name('iframe'):
-                if element.get_attribute('allowfullscreen') is not None:
-                    actual_ad_ins_element = element
-                    break
-            if actual_ad_ins_element is not None:
-                type = 1
-                name = actual_ad_ins_element.get_attribute('src')
-                browser.switch_to.frame(actual_ad_ins_element)
+        while count > 0:
+            if ad_src_url is not "":
+                browser.get(ad_src_url)
+
+            browser.save_screenshot('current-ad.png')
+            try:
+                browser.implicitly_wait(10)
+                browser.switch_to.frame(browser.find_element_by_id('ad_iframe'))
+                # Switch to that or else look into the other type of html
+                # embedded google ad.
+                # Wait for the ad iframe to be rendered after the switch.
+                browser.implicitly_wait(10)
+                actual_ad_ins_element = None
+                for element in browser.find_elements_by_tag_name('iframe'):
+                    if element.get_attribute('allowfullscreen') is not None:
+                        actual_ad_ins_element = element
+                        break
+                if actual_ad_ins_element is not None:
+                    type = 1
+                    name = actual_ad_ins_element.get_attribute('src')
+                    browser.switch_to.frame(actual_ad_ins_element)
+                else:
+                    type = 2
+                    name = browser.find_element_by_xpath('//a//img').get_attribute('src')
+            except NoSuchElementException:
+                try:
+                    ad_href_link = browser.find_element_by_tag_name('a')
+                    type = 3
+                    name = ad_href_link.get_attribute('href')
+                    try:
+                        name_list = name.split('&')
+                        for x in name_list:
+                            if 'adurl=' in x:
+                                x = x.split('=')[1]
+                                x = urllib.parse.unquote(x)
+                                name = x.split('?')[0]
+                                break
+
+                    except:
+                        print(name)
+                except:
+                    continue
+
+            finally:
+                html = browser.execute_script("return document.getElementsByTagName('html')[0].innerHTML")
+
+            # File name where to save.
+            utf8_name = name.encode('utf-8')
+            file_name = 'ads-' + str(type) + '-' + get_file_name(utf8_name) + '.html'
+
+            if name in bloom:
+                # print(name, 'already present')
+                logger.info('already present: ' + name)
+                continue
             else:
-                type = 2
-                name = browser.find_element_by_xpath('//a//img').get_attribute('src')
-        except NoSuchElementException:
-            ad_href_link = browser.find_element_by_tag_name('a')
-            type = 3
-            name = ad_href_link.get_attribute('href')
+                bloom.add(name)
 
-        finally:
-            html = browser.execute_script("return document.getElementsByTagName('html')[0].innerHTML")
+            logger.info(str(name) + " : " + file_name)
 
-        # File name where to save.
-        utf8_name = name.encode('utf-8')
-        file_name = 'ads-' + str(type) + '-' + get_file_name(utf8_name) + '.html'
+            # Remove all script tags
+            soup = BeautifulSoup(html, 'html.parser')
+            [x.extract() for x in soup.findAll('script')]
 
-        if name in bloom:
-            logger.info('already present: ' + name)
-            return
-        else:
-            bloom.add(name)
+            print(file_name, name)
 
-        logger.info(str(name) + " : " + file_name)
-        # # Save image if type 1
-        # if type == 1:
-        #     print(name)
-        #     parsed = urlparse(url)
-        #     root, ext = splitext(parsed.path)
-        #     urlrequest.urlretrieve(name, file_name + '.' + ext)
-
-        # Remove all script tags
-        soup = BeautifulSoup(html, 'html.parser')
-        [x.extract() for x in soup.findAll('script')]
-
-        print(file_name, name)
-
-        # Save HTML file
-        complete_name = os.path.join(save_path, file_name)
-        file_object = codecs.open(complete_name, "w", "utf-8")
-        file_object.write(str(soup))
-        file_object.close()
+            # Save HTML file
+            complete_name = os.path.join(save_path, file_name)
+            file_object = codecs.open(complete_name, "w", "utf-8")
+            file_object.write(str(soup))
+            file_object.close()
+            count -= 1
     # Didnot find any iframe with google_ads_frame<number> id.
-    except NoSuchElementException as e:
-        print(e.msg)
+    except Exception as e:
+        # print(e.msg)
+        browser.save_screenshot('error.png')
         logger.error('google_ads_frame<num> not found exception:' + e.msg)
 
 
 if __name__ == '__main__':
     # Initialise the webdriver for selenium
     # TODO: Need to use PhantomJS for scraping on a server.
-    # dcap = dict(DesiredCapabilities.PHANTOMJS)
-    # dcap["phantomjs.page.settings.userAgent"] = (
-    #     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/53 "
-    #     "(KHTML, like Gecko) Chrome/15.0.87")
-    # driver = webdriver.PhantomJS(executable_path='/Users/anupam/Python/Ads_Scraper/phantomjs', desired_capabilities=dcap)
-    driver = webdriver.Chrome(executable_path='./chromedriver')
-    bloom = BloomFilter(max_elements=10000, error_rate=0.1)
+    dcap = dict(DesiredCapabilities.PHANTOMJS)
+    dcap["phantomjs.page.settings.userAgent"] = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36")
+    driver = webdriver.PhantomJS(executable_path='./phantomjs', desired_capabilities=dcap, service_args=['--ignore-ssl-errors=true', '--ssl-protocol=TLSv1'])
+    # driver = webdriver.Chrome(executable_path='./chromedriver')
+    driver.set_window_size(1280, 628)
+
+    bloom = BloomFilter(max_elements=1000000, error_rate=0.1)
+    pickle_file = 'filter.pickle'
+    if os.path.exists(pickle_file):
+        print('%s already present - Loading saved filter.' % pickle_file)
+        try:
+            with open(pickle_file, 'rb') as f:
+                bloom = pickle.load(f)
+        except Exception as e:
+            print("Unable to read data from %s" % pickle_file)
+
     # Seed URL
-    url_list = ['http://www.geeksforgeeks.org/']
+    base_url = 'https://www.tutorialspoint.com/'
+    url_list = [base_url]
     driver.get(url_list[0])
     links = driver.find_elements_by_tag_name('a')
     for link in links:
         href = link.get_attribute('href')
-        if href is not None and href not in url_list and 'www.geeksforgeeks.org' in href:
+        if href is not None and href not in url_list and base_url in href:
             url_list.append(href)
 
     logger = logging.getLogger('ads_scraper')
@@ -183,9 +222,28 @@ if __name__ == '__main__':
 
     print(len(url_list))
     i = 0
-    for url in url_list:
+    while i<len(url_list) or i<5000:
+        url = url_list[i]
         driver.get(url)
+        links = driver.find_elements_by_tag_name('a')
+        for link in links:
+            href = link.get_attribute('href')
+            if href is not None and href not in url_list and base_url in href:
+                url_list.append(href)
+        logger = logging.getLogger('ads_scraper')
+        hdlr = logging.FileHandler('scraper.log')
+        formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+        hdlr.setFormatter(formatter)
+        logger.addHandler(hdlr)
+        logger.setLevel(logging.WARNING)
         get_ads_file(driver, url, i, bloom)
+        try:
+            f = open(pickle_file, 'wb')
+            pickle.dump(bloom, f, pickle.HIGHEST_PROTOCOL)
+            f.close()
+        except Exception as e:
+            print('Unable to save data to', pickle_file, ':', e)
+            raise
         i += 1
-
+    print('Finished')
     driver.quit()
