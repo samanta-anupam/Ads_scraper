@@ -189,7 +189,8 @@ if __name__ == '__main__':
     dcap = dict(DesiredCapabilities.PHANTOMJS)
     dcap["phantomjs.page.settings.userAgent"] = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36")
-    driver = webdriver.PhantomJS(executable_path='./phantomjs', desired_capabilities=dcap, service_args=['--ignore-ssl-errors=true', '--ssl-protocol=TLSv1'])
+    driver = webdriver.PhantomJS(executable_path='./phantomjs', desired_capabilities=dcap,
+                                 service_args=['--ignore-ssl-errors=true', '--ssl-protocol=TLSv1'])
     # driver = webdriver.Chrome(executable_path='./chromedriver')
     driver.set_window_size(1280, 628)
 
@@ -221,29 +222,33 @@ if __name__ == '__main__':
     logger.setLevel(logging.WARNING)
 
     print(len(url_list))
-    i = 0
-    while i<len(url_list) or i<5000:
-        url = url_list[i]
-        driver.get(url)
-        links = driver.find_elements_by_tag_name('a')
-        for link in links:
-            href = link.get_attribute('href')
-            if href is not None and href not in url_list and base_url in href:
-                url_list.append(href)
-        logger = logging.getLogger('ads_scraper')
-        hdlr = logging.FileHandler('scraper.log')
-        formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-        hdlr.setFormatter(formatter)
-        logger.addHandler(hdlr)
-        logger.setLevel(logging.WARNING)
-        get_ads_file(driver, url, i, bloom)
+    idx = 0
+    while idx < len(url_list) and idx < 5000:
         try:
-            f = open(pickle_file, 'wb')
-            pickle.dump(bloom, f, pickle.HIGHEST_PROTOCOL)
-            f.close()
-        except Exception as e:
-            print('Unable to save data to', pickle_file, ':', e)
-            raise
-        i += 1
-    print('Finished')
+            url = url_list[idx]
+            driver.get(url)
+            links = driver.find_elements_by_tag_name('a')
+            for link in links:
+                href = link.get_attribute('href')
+                if href is not None and href not in url_list and base_url in href:
+                    url_list.append(href)
+            logger = logging.getLogger('ads_scraper')
+            hdlr = logging.FileHandler('scraper.log')
+            formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+            hdlr.setFormatter(formatter)
+            logger.addHandler(hdlr)
+            logger.setLevel(logging.WARNING)
+            get_ads_file(driver, url, idx, bloom)
+            try:
+                f = open(pickle_file, 'wb')
+                pickle.dump(bloom, f, pickle.HIGHEST_PROTOCOL)
+                f.close()
+            except Exception as e:
+                print('Unable to save data to', pickle_file, ':', e)
+                raise
+            idx += 1
+        except IndexError as e:
+            print(e.msg)
+            break
+    print('Finished', idx)
     driver.quit()
